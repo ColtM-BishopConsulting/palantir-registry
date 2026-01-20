@@ -1,87 +1,62 @@
 -- Palantir Registry Schema
 -- Run this in your Neon SQL console to set up the database
 
--- Users table: Roblox users who have registered assets
-CREATE TABLE IF NOT EXISTS users (
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- Owners use secret keys for admin operations
+CREATE TABLE IF NOT EXISTS owners (
     id SERIAL PRIMARY KEY,
-    roblox_user_id BIGINT UNIQUE NOT NULL,
-    roblox_username TEXT,
+    display_name TEXT,
+    owner_key TEXT UNIQUE NOT NULL,
+    roblox_user_id BIGINT,
+    roblox_group_id BIGINT,
     discord_user_id BIGINT,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Assets table: Individual mesh registrations
-CREATE TABLE IF NOT EXISTS assets (
-    id SERIAL PRIMARY KEY,
-    asset_id BIGINT UNIQUE NOT NULL,          -- Roblox asset ID (MeshId)
-    owner_id BIGINT NOT NULL REFERENCES users(roblox_user_id),
-    name TEXT,
-    asset_type TEXT DEFAULT 'mesh',            -- 'mesh' or 'texture'
-    size_x REAL,
-    size_y REAL,
-    size_z REAL,
-    material TEXT,
-    texture_id BIGINT,
-    registered_at TIMESTAMPTZ DEFAULT NOW(),
-    
-    CONSTRAINT valid_asset_type CHECK (asset_type IN ('mesh', 'texture'))
-);
-
--- Models table: Model bundles containing multiple meshes
 CREATE TABLE IF NOT EXISTS models (
-    id SERIAL PRIMARY KEY,
-    owner_id BIGINT NOT NULL REFERENCES users(roblox_user_id),
-    name TEXT NOT NULL,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_id INT REFERENCES owners(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    roblox_asset_id BIGINT,
     mesh_count INT DEFAULT 0,
-    fingerprint TEXT,                          -- Hash for quick identification
+    fingerprint TEXT,
     registered_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Model-Asset junction: Links models to their meshes
-CREATE TABLE IF NOT EXISTS model_assets (
+CREATE TABLE IF NOT EXISTS whitelist (
     id SERIAL PRIMARY KEY,
-    model_id INT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
-    asset_id BIGINT NOT NULL,                  -- Roblox asset ID
-    name TEXT,
-    path TEXT,                                 -- Hierarchy path within model
-    size_x REAL,
-    size_y REAL,
-    size_z REAL,
-    material TEXT,
-    texture_id BIGINT
+    model_id UUID REFERENCES models(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL,
+    note TEXT,
+    added_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(model_id, user_id)
 );
 
--- Scan history: Track when assets are scanned/detected
-CREATE TABLE IF NOT EXISTS scan_logs (
+CREATE TABLE IF NOT EXISTS model_meshes (
     id SERIAL PRIMARY KEY,
-    scanner_user_id BIGINT NOT NULL,           -- Who ran the scan
-    scanned_model_name TEXT,
-    asset_ids BIGINT[],                        -- Array of asset IDs found
-    flagged_assets BIGINT[],                   -- Assets belonging to others
-    scanned_at TIMESTAMPTZ DEFAULT NOW()
+    model_id UUID REFERENCES models(id) ON DELETE CASCADE,
+    mesh_asset_id BIGINT NOT NULL,
+    mesh_name TEXT,
+    UNIQUE(model_id, mesh_asset_id)
 );
 
--- Indexes for fast lookups
-CREATE INDEX IF NOT EXISTS idx_assets_owner ON assets(owner_id);
-CREATE INDEX IF NOT EXISTS idx_assets_asset_id ON assets(asset_id);
+CREATE TABLE IF NOT EXISTS usage_logs (
+    id SERIAL PRIMARY KEY,
+    model_id UUID REFERENCES models(id),
+    actor_user_id BIGINT NOT NULL,
+    place_id BIGINT,
+    server_job_id TEXT,
+    mesh_ids BIGINT[],
+    meta JSONB,
+    allowed BOOLEAN,
+    reason TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_models_owner ON models(owner_id);
-CREATE INDEX IF NOT EXISTS idx_model_assets_model ON model_assets(model_id);
-CREATE INDEX IF NOT EXISTS idx_model_assets_asset ON model_assets(asset_id);
-CREATE INDEX IF NOT EXISTS idx_scan_logs_scanner ON scan_logs(scanner_user_id);
-
--- Function to update updated_at timestamp
-CREATE OR REPLACE FUNCTION update_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Trigger for users table
-DROP TRIGGER IF EXISTS users_updated_at ON users;
-CREATE TRIGGER users_updated_at
-    BEFORE UPDATE ON users
-    FOR EACH ROW
-    EXECUTE FUNCTION update_updated_at();
+CREATE INDEX IF NOT EXISTS idx_whitelist_model ON whitelist(model_id);
+CREATE INDEX IF NOT EXISTS idx_whitelist_user ON whitelist(user_id);
+CREATE INDEX IF NOT EXISTS idx_model_meshes_model ON model_meshes(model_id);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_model ON usage_logs(model_id);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_actor ON usage_logs(actor_user_id);

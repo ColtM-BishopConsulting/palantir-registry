@@ -1,23 +1,35 @@
 -- Registry.lua
--- Handles asset registration with the Palantir server
+-- Client for the Palantir registry server
 
 local HttpService = game:GetService("HttpService")
-local Selection = game:GetService("Selection")
-
 local Registry = {}
-Registry.API_URL = "YOUR_VERCEL_URL_HERE" -- e.g., "https://palantir-registry.vercel.app"
+Registry.API_URL = "" -- set via Registry.setup({ apiUrl = "..." })
+Registry.OwnerKey = nil
+Registry.ModelId = nil
+
+-- ============ SETUP ============
+
+function Registry.setup(cfg)
+	cfg = cfg or {}
+	if cfg.apiUrl then
+		Registry.API_URL = cfg.apiUrl
+	end
+	if cfg.ownerKey then
+		Registry.OwnerKey = cfg.ownerKey
+	end
+	if cfg.modelId then
+		Registry.ModelId = cfg.modelId
+	end
+end
 
 -- ============ UTILITY FUNCTIONS ============
 
--- Extract numeric asset ID from various formats
 local function parseAssetId(idString)
 	if not idString or idString == "" then return nil end
-	-- Handle "rbxassetid://12345" or just "12345"
 	local id = tostring(idString):match("%d+")
 	return id and tonumber(id) or nil
 end
 
--- Get full hierarchy path of an instance
 local function getPath(instance, root)
 	local parts = {}
 	local current = instance
@@ -28,12 +40,9 @@ local function getPath(instance, root)
 	return table.concat(parts, "/")
 end
 
--- Generate a fingerprint for a model (for quick identification)
 local function generateFingerprint(meshIds)
-	-- Simple hash: sorted asset IDs concatenated
 	table.sort(meshIds)
 	local str = table.concat(meshIds, "-")
-	-- Basic hash (could use a proper hash function if needed)
 	local hash = 0
 	for i = 1, #str do
 		hash = (hash * 31 + string.byte(str, i)) % 2147483647
@@ -41,20 +50,77 @@ local function generateFingerprint(meshIds)
 	return tostring(hash)
 end
 
+local function buildQuery(params)
+	if not params then return "" end
+	local parts = {}
+	for key, value in pairs(params) do
+		if value ~= nil then
+			local encoded = HttpService:UrlEncode(tostring(value))
+			table.insert(parts, key .. "=" .. encoded)
+		end
+	end
+	if #parts == 0 then return "" end
+	return "?" .. table.concat(parts, "&")
+end
+
+local function request(method, endpoint, data, query)
+	local url = Registry.API_URL .. endpoint .. buildQuery(query)
+	local body = data and HttpService:JSONEncode(data) or nil
+
+	local success, response = pcall(function()
+		return HttpService:RequestAsync({
+			Url = url,
+			Method = method,
+			Headers = { ["Content-Type"] = "application/json" },
+			Body = body,
+		})
+	end)
+
+	if not success then
+		return false, { error = tostring(response) }
+	end
+
+	if response.Success then
+		local ok, decoded = pcall(function()
+			return HttpService:JSONDecode(response.Body)
+		end)
+		return true, ok and decoded or { raw = response.Body }
+	end
+
+	return false, {
+		statusCode = response.StatusCode,
+		statusMessage = response.StatusMessage,
+		body = response.Body,
+	}
+end
+
+local function post(endpoint, data)
+	return request("POST", endpoint, data)
+end
+
+local function get(endpoint, query)
+	return request("GET", endpoint, nil, query)
+end
+
+local function ownerBody(data)
+	data = data or {}
+	data.owner_key = data.owner_key or Registry.OwnerKey
+	return data
+end
+
 -- ============ DATA EXTRACTION ============
 
--- Extract all mesh data from a model
 function Registry.ParseModel(model)
 	if not model or not model:IsA("Model") then
 		return nil, "Invalid model"
 	end
-	
+
 	local meshes = {}
 	local meshIds = {}
-	
+
 	for _, inst in ipairs(model:GetDescendants()) do
 		local meshId, meshData = nil, nil
-		
+
 		if inst:IsA("MeshPart") then
 			meshId = parseAssetId(inst.MeshId)
 			if meshId then
@@ -85,22 +151,20 @@ function Registry.ParseModel(model)
 				}
 			end
 		end
-		
+
 		if meshId and meshData then
-			-- Dedupe by assetId (same mesh used multiple times)
 			if not meshIds[meshId] then
 				meshIds[meshId] = true
 				table.insert(meshes, meshData)
 			end
 		end
 	end
-	
-	-- Build asset ID list for fingerprint
+
 	local idList = {}
 	for id in pairs(meshIds) do
 		table.insert(idList, id)
 	end
-	
+
 	return {
 		name = model.Name,
 		meshCount = #meshes,
@@ -109,14 +173,13 @@ function Registry.ParseModel(model)
 	}
 end
 
--- Extract data for individual mesh selection
 function Registry.ParseMeshes(instances)
 	local meshes = {}
 	local seen = {}
-	
+
 	for _, inst in ipairs(instances) do
 		local meshId, meshData = nil, nil
-		
+
 		if inst:IsA("MeshPart") then
 			meshId = parseAssetId(inst.MeshId)
 			if meshId and not seen[meshId] then
@@ -149,7 +212,6 @@ function Registry.ParseMeshes(instances)
 				table.insert(meshes, meshData)
 			end
 		elseif inst:IsA("Model") then
-			-- Recursively get meshes from model
 			for _, child in ipairs(inst:GetDescendants()) do
 				local childId = nil
 				if child:IsA("MeshPart") then
@@ -159,8 +221,7 @@ function Registry.ParseMeshes(instances)
 				end
 				if childId and not seen[childId] then
 					seen[childId] = true
-					-- Recurse with single item
-					local parsed = Registry.ParseMeshes({child})
+					local parsed = Registry.ParseMeshes({ child })
 					for _, m in ipairs(parsed) do
 						table.insert(meshes, m)
 					end
@@ -168,173 +229,124 @@ function Registry.ParseMeshes(instances)
 			end
 		end
 	end
-	
+
 	return meshes
+end
+
+function Registry.collectMeshIdsFromModel(model)
+	local ids = {}
+	local seen = {}
+
+	if not model or not model:IsA("Model") then
+		return ids
+	end
+
+	for _, inst in ipairs(model:GetDescendants()) do
+		local meshId = nil
+		if inst:IsA("MeshPart") then
+			meshId = parseAssetId(inst.MeshId)
+		elseif inst:IsA("SpecialMesh") then
+			meshId = parseAssetId(inst.MeshId)
+		end
+
+		if meshId and not seen[meshId] then
+			seen[meshId] = true
+			table.insert(ids, meshId)
+		end
+	end
+
+	return ids
 end
 
 -- ============ API CALLS ============
 
--- POST request helper
-local function post(endpoint, data)
-	local url = Registry.API_URL .. endpoint
-	local body = HttpService:JSONEncode(data)
-	
-	local success, response = pcall(function()
-		return HttpService:RequestAsync({
-			Url = url,
-			Method = "POST",
-			Headers = { ["Content-Type"] = "application/json" },
-			Body = body,
-		})
-	end)
-	
-	if not success then
-		return false, { error = tostring(response) }
-	end
-	
-	if response.Success then
-		local ok, decoded = pcall(function()
-			return HttpService:JSONDecode(response.Body)
-		end)
-		return true, ok and decoded or { raw = response.Body }
-	else
-		return false, { 
-			statusCode = response.StatusCode, 
-			statusMessage = response.StatusMessage,
-			body = response.Body 
-		}
-	end
-end
-
--- GET request helper
-local function get(endpoint)
-	local url = Registry.API_URL .. endpoint
-	
-	local success, response = pcall(function()
-		return HttpService:RequestAsync({
-			Url = url,
-			Method = "GET",
-			Headers = { ["Content-Type"] = "application/json" },
-		})
-	end)
-	
-	if not success then
-		return false, { error = tostring(response) }
-	end
-	
-	if response.Success then
-		local ok, decoded = pcall(function()
-			return HttpService:JSONDecode(response.Body)
-		end)
-		return true, ok and decoded or { raw = response.Body }
-	else
-		return false, { 
-			statusCode = response.StatusCode, 
-			statusMessage = response.StatusMessage 
-		}
-	end
-end
-
--- Register a full model
-function Registry.RegisterModel(model, robloxUserId, robloxUsername)
-	local modelData, err = Registry.ParseModel(model)
-	if not modelData then
-		return false, err
-	end
-	
-	return post("/register/model", {
-		robloxUserId = robloxUserId,
-		robloxUsername = robloxUsername,
-		model = modelData,
+function Registry.createOwner(displayName)
+	return post("/owner/create", {
+		display_name = displayName,
 	})
 end
 
--- Register individual meshes
-function Registry.RegisterMeshes(meshes, robloxUserId, robloxUsername)
-	if #meshes == 0 then
-		return false, "No meshes to register"
-	end
-	
-	return post("/register/mesh", {
-		robloxUserId = robloxUserId,
-		robloxUsername = robloxUsername,
-		meshes = meshes,
+function Registry.rotateOwnerKey(ownerId, oldKey)
+	return post("/owner/rotate-key", {
+		owner_key = oldKey or Registry.OwnerKey,
+		owner_id = ownerId,
 	})
 end
 
--- Check ownership of assets
-function Registry.CheckOwnership(assetIds)
-	return post("/check", {
-		assetIds = assetIds,
+function Registry.registerModel(displayName, robloxAssetId, meshCount, fingerprint)
+	local payload = ownerBody({
+		display_name = displayName,
+		roblox_asset_id = robloxAssetId,
 	})
-end
 
--- Get user's registered assets
-function Registry.GetUserAssets(robloxUserId)
-	return get("/user/" .. tostring(robloxUserId))
-end
-
--- Log a scan
-function Registry.LogScan(scannerUserId, modelName, assetIds, flaggedAssets)
-	return post("/scan/log", {
-		scannerUserId = scannerUserId,
-		modelName = modelName,
-		assetIds = assetIds,
-		flaggedAssets = flaggedAssets or {},
-	})
-end
-
--- ============ HIGH-LEVEL FUNCTIONS ============
-
--- Register currently selected model
-function Registry.RegisterSelected(robloxUserId, robloxUsername)
-	local sel = Selection:Get()
-	if #sel == 0 then
-		return false, "Nothing selected"
-	end
-	
-	local model = sel[1]
-	if model:IsA("Model") then
-		return Registry.RegisterModel(model, robloxUserId, robloxUsername)
+	if type(meshCount) == "table" then
+		payload.mesh_count = meshCount.meshCount or meshCount.mesh_count
+		payload.fingerprint = meshCount.fingerprint
 	else
-		-- Try to register as individual meshes
-		local meshes = Registry.ParseMeshes(sel)
-		if #meshes == 0 then
-			return false, "No meshes found in selection"
-		end
-		return Registry.RegisterMeshes(meshes, robloxUserId, robloxUsername)
+		payload.mesh_count = meshCount
+		payload.fingerprint = fingerprint
 	end
+
+	return post("/model/register", payload)
 end
 
--- Check selected model against registry
-function Registry.CheckSelected()
-	local sel = Selection:Get()
-	if #sel == 0 then
-		return false, "Nothing selected"
-	end
-	
-	local meshes = {}
-	local model = sel[1]
-	
-	if model:IsA("Model") then
-		local parsed = Registry.ParseModel(model)
-		if parsed then
-			for _, m in ipairs(parsed.meshes) do
-				table.insert(meshes, m.assetId)
-			end
-		end
-	else
-		local parsed = Registry.ParseMeshes(sel)
-		for _, m in ipairs(parsed) do
-			table.insert(meshes, m.assetId)
-		end
-	end
-	
-	if #meshes == 0 then
-		return false, "No meshes found"
-	end
-	
-	return Registry.CheckOwnership(meshes)
+function Registry.whitelistAdd(userId, note)
+	return post("/whitelist/add", ownerBody({
+		model_id = Registry.ModelId,
+		user_id = userId,
+		note = note,
+	}))
+end
+
+function Registry.whitelistAddMany(userIds, note)
+	return post("/whitelist/add-many", ownerBody({
+		model_id = Registry.ModelId,
+		user_ids = userIds,
+		note = note,
+	}))
+end
+
+function Registry.whitelistRemove(userId)
+	return post("/whitelist/remove", ownerBody({
+		model_id = Registry.ModelId,
+		user_id = userId,
+	}))
+end
+
+function Registry.upsertModelMeshes(meshList)
+	return post("/meshes/upsert", ownerBody({
+		model_id = Registry.ModelId,
+		meshes = meshList,
+	}))
+end
+
+function Registry.checkAccessAndLog(actorUserId, meshIds, meta)
+	meta = meta or {}
+	local payload = {
+		model_id = Registry.ModelId,
+		actor_user_id = actorUserId,
+		mesh_ids = meshIds,
+		meta = meta,
+		place_id = meta.place_id or meta.placeId,
+		server_job_id = meta.server_job_id or meta.serverJobId,
+	}
+
+	return post("/access/check", payload)
+end
+
+function Registry.listUsageLogs(modelId, opts)
+	opts = opts or {}
+	return get("/usage-logs/" .. tostring(modelId), {
+		owner_key = Registry.OwnerKey,
+		page = opts.page,
+		page_size = opts.page_size or opts.pageSize,
+	})
+end
+
+function Registry.getStats(modelId)
+	return get("/stats/" .. tostring(modelId), {
+		owner_key = Registry.OwnerKey,
+	})
 end
 
 return Registry
