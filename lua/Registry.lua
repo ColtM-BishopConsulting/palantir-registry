@@ -344,7 +344,9 @@ function Registry.listUsageLogs(modelId, opts)
 end
 
 function Registry.getModel(modelId)
-	return get("/model/" .. tostring(modelId))
+	return get("/model/" .. tostring(modelId), {
+		owner_key = Registry.OwnerKey,
+	})
 end
 
 function Registry.getStats(modelId)

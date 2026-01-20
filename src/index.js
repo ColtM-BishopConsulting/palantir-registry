@@ -333,28 +333,22 @@ app.post('/model/register', async (req, res) => {
 
 app.get('/model/:modelId', async (req, res) => {
   const { modelId } = req.params;
+  const ownerKey = req.query?.owner_key;
 
   try {
     const result = await db.query(
-      `SELECT m.*, o.display_name AS owner_name
+      `SELECT m.*, o.display_name AS owner_name, o.id AS owner_db_id
        FROM models m
        JOIN owners o ON m.owner_id = o.id
-       WHERE m.id = $1`,
-      [modelId]
+       WHERE m.id = $1 AND o.owner_key = $2`,
+      [modelId, ownerKey]
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Model not found' });
+      return res.status(404).json({ error: 'Model not found or access denied' });
     }
 
-    const counts = await db.query(
-      `SELECT
-        (SELECT COUNT(*) FROM whitelist WHERE model_id = $1) AS whitelist_count,
-        (SELECT COUNT(*) FROM model_meshes WHERE model_id = $1) AS mesh_count`,
-      [modelId]
-    );
-
-    res.json({ model: result.rows[0], counts: counts.rows[0] });
+    res.json({ model: result.rows[0] });
   } catch (err) {
     console.error('Model fetch error:', err);
     res.status(500).json({ error: err.message });

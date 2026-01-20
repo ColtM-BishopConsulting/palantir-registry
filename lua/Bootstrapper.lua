@@ -59,6 +59,7 @@ end
 setupRegistry()
 
 local refreshRegistryView
+local updateRegModelInfo
 
 -- ==== GUI mount ====
 local coreGui = game:GetService("CoreGui")
@@ -159,7 +160,7 @@ local Dash_ListCont = dashboard:WaitForChild("ListingContainer")
 local Dash_LCCont = Dash_ListCont:WaitForChild("Content")
 local Dash_Listings = Dash_LCCont:WaitForChild("Listings")
 local Dash_Content = Dash_Overview:WaitForChild("Content")
-local Dash_RegMod = Dash_Content:WaitForChild("Register")
+local Dash_RegMod = Dash_Content:FindFirstChild("RegisterModel") or Dash_Content:FindFirstChild("Register") or Dash_Content:WaitForChild("Register")
 local Dash_SwapDash = Dash_Content:WaitForChild("SwapOwner")
 
 local grp_dashboard = regView:WaitForChild("Group_Dashboard")
@@ -169,7 +170,7 @@ local gDash_ListCont = grp_dashboard:WaitForChild("ListingContainer")
 local gDash_LCCont = gDash_ListCont:WaitForChild("Content")
 local gDash_Listings = gDash_LCCont:WaitForChild("Listings")
 local gDash_Content = gDash_Overview:WaitForChild("Content")
-local gDash_RegMod = gDash_Content:WaitForChild("Register")
+local gDash_RegMod = gDash_Content:FindFirstChild("RegisterModel") or gDash_Content:FindFirstChild("Register") or gDash_Content:WaitForChild("Register")
 local gDash_SwapDash = gDash_Content:WaitForChild("SwapOwner")
 
 local dd_Tools = tabBar:FindFirstChild("Tools_DropDown")
@@ -449,6 +450,11 @@ local function refreshScanButtons()
 end
 
 Selection.SelectionChanged:Connect(refreshScanButtons)
+Selection.SelectionChanged:Connect(function()
+	if regPop.Visible and updateRegModelInfo then
+		updateRegModelInfo(isModelSelected())
+	end
+end)
 refreshScanButtons()
 
 -- ===== Popup (UserId) =====
@@ -473,6 +479,9 @@ local function closePopup()
 end
 
 local function openRegisterPopup()
+	if updateRegModelInfo then
+		updateRegModelInfo(isModelSelected())
+	end
 	regPop.Visible = true
 	whitelistInput:CaptureFocus()
 end
@@ -587,6 +596,49 @@ local function findDescendant(parent, name)
 		end
 	end
 	return nil
+end
+
+local function setRegLabel(parent, name, value)
+	local label = findDescendant(parent, name)
+	if label and label:IsA("TextLabel") then
+		label.Text = tostring(value)
+	end
+end
+
+updateRegModelInfo = function(model)
+	if not regUserInfo then return end
+	local inset = regUserInfo:FindFirstChild("InsetInfo") or regUserInfo
+
+	if not model then
+		setRegLabel(inset, "Selected_Info", "<None>")
+		setRegLabel(inset, "TypeOf_Info", "<None>")
+		setRegLabel(inset, "Meshes_Info", "0")
+		setRegLabel(inset, "Meshes_Info1", "0")
+		setRegLabel(inset, "Meshes_Info2", "0")
+		return
+	end
+
+	local parsed = RegistryMod.ParseModel(model)
+	local uniqueMeshes = parsed and parsed.meshCount or 0
+	local instanceCount = 0
+	for _, inst in ipairs(model:GetDescendants()) do
+		if inst:IsA("MeshPart") then
+			if inst.MeshId and inst.MeshId ~= "" then instanceCount += 1 end
+		elseif inst:IsA("SpecialMesh") then
+			if inst.MeshId and inst.MeshId ~= "" then instanceCount += 1 end
+		end
+	end
+
+	setRegLabel(inset, "Selected_Info", model.Name)
+	setRegLabel(inset, "TypeOf_Info", "Model")
+	setRegLabel(inset, "Meshes_Info", uniqueMeshes)
+	setRegLabel(inset, "Meshes_Info1", uniqueMeshes)
+	setRegLabel(inset, "Meshes_Info2", instanceCount)
+
+	local title = regUserInfo:FindFirstChildWhichIsA("TextLabel")
+	if title then
+		title.Text = model.Name
+	end
 end
 
 local function formatDate(iso)
